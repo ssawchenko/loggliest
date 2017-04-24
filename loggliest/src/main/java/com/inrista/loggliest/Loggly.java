@@ -24,6 +24,8 @@ import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.google.gson.annotations.SerializedName;
+
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -43,29 +45,32 @@ import java.util.Locale;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
-import retrofit.RestAdapter;
-import retrofit.RetrofitError;
-import retrofit.client.Response;
-import retrofit.http.Body;
-import retrofit.http.Headers;
-import retrofit.http.POST;
-import retrofit.http.Path;
-import retrofit.mime.TypedByteArray;
-import retrofit.mime.TypedInput;
+import okhttp3.Interceptor;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import retrofit2.Call;
+import retrofit2.Retrofit;
+import retrofit2.converter.gson.GsonConverterFactory;
+import retrofit2.http.Body;
+import retrofit2.http.POST;
+import retrofit2.http.Path;
 
 /**
  * Android Loggly client using the HTTP/S bulk api.
  * <p>
- * First, initialize the global singleton instance using the 
+ * First, initialize the global singleton instance using the
  * {@link Builder} provided by {@link #with(android.content.Context, String)}.
- * You must provide your Loggly token. A minimal setup looks like this:   
+ * You must provide your Loggly token. A minimal setup looks like this:
  * <pre>
  * final String TOKEN = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
  * Loggly.with(this, TOKEN).init();
  * </pre>
  * Log a message:
  * <pre>
- * Loggly.i("stringfield", "test"); 
+ * Loggly.i("stringfield", "test");
  * Loggly.i("numberfield", 123);
  * </pre>
  * Log messages are formatted as json messages as expected by Loggly. Along with
@@ -74,21 +79,21 @@ import retrofit.mime.TypedInput;
  * and a "timestamp" set according to when the message was logged. Also, a set of
  * various default fields can be appended, see {@link Builder#appendDefaultInfo(boolean)}
  * <p>
- * The log messages are saved in the internal app storage and uploaded to Loggly  
+ * The log messages are saved in the internal app storage and uploaded to Loggly
  * in bulk when either one of these conditions are fulfilled:
  * <p>
  * <ul>
- * <li>1. The time since the last upload exceeds the 
+ * <li>1. The time since the last upload exceeds the
  * {@link Builder#uploadIntervalSecs(int seconds)} setting</li>
- * <li>2. The number of log messages since the last upload exceeds the 
+ * <li>2. The number of log messages since the last upload exceeds the
  * {@link Builder#uploadIntervalLogCount(int count)} setting</li>
- * <li>3. A new {@link Loggly} instance is created and there are (old) 
+ * <li>3. A new {@link Loggly} instance is created and there are (old)
  * messages that have not been uploaded</li>
  * <li>4. {@link #forceUpload()} is called</li>
  * </ul>
  * <p>
  * A typical configuration that sets upload intervals to 30mins, max number of messages
- * between uploads to 1000 messages, limits the internal app storage log buffer to 500k 
+ * between uploads to 1000 messages, limits the internal app storage log buffer to 500k
  * and appends the default info fields along with a custom language field looks like this:
  * <pre>
  * Loggly.with(this, TOKEN)
@@ -99,7 +104,7 @@ import retrofit.mime.TypedInput;
  *     .appendStickyInfo("language", currentLanguage)
  *     .init();
  * </pre>
- * <b>NOTE:</b> Short upload intervals will have a negative effect on the battery life. 
+ * <b>NOTE:</b> Short upload intervals will have a negative effect on the battery life.
  *
  */
 public class Loggly {
@@ -121,7 +126,7 @@ public class Loggly {
 
     private static volatile Loggly mInstance;
     private static volatile Builder mBuilder;
-    
+
     private static Context mContext;
     private static String mToken;
     private static String mLogglyTag;
@@ -129,7 +134,7 @@ public class Loggly {
     private static int mUploadIntervalLogCount;
     private static int mIdleSecs;
     private static boolean mAppendDefaultInfo;
-     
+
     private static IBulkLog mBulkLogService;
     private static Thread mThread = null;
     private static LinkedBlockingQueue<JSONObject> mLogQueue = new LinkedBlockingQueue<JSONObject>();
@@ -142,7 +147,7 @@ public class Loggly {
     private static int mAppVersionCode = 0;
     private static HashMap<String, String> mStickyInfo = null;
     private static int mMaxSizeOnDisk = 0;
-    
+
     /**
      * Configures the {@link Loggly} instance.
      *
@@ -158,14 +163,14 @@ public class Loggly {
         private boolean appendDefaultInfo = APPEND_DEFAULT_INFO_DEFAULT;
         private HashMap<String, String> stickyInfo = new HashMap<String, String>();
         private int maxSizeOnDisk = MAX_SIZE_ON_DISK_DEFAULT;
-        
+
         private Builder(Context context, String token) {
             this.token = token;
             this.context = context.getApplicationContext();
         }
-        
+
         /**
-         * Set the Loggly tag that the log messages are tagged with. 
+         * Set the Loggly tag that the log messages are tagged with.
          * If not specified this defaults to the package name.
          * @param logglyTag The Loggly tag
          */
@@ -183,10 +188,10 @@ public class Loggly {
             this.logglyUrl = logglyUrl;
             return this;
         }
-        
+
         /**
          * Set the interval between Loggly log uploads. Note that short intervals
-         * drains the battery. If not specified this defaults to 900 (15min). Also see 
+         * drains the battery. If not specified this defaults to 900 (15min). Also see
          * {@link #uploadIntervalLogCount(int count)}, when either condition is
          * fulfilled the logs will be uploaded.
          * @param seconds Time in seconds
@@ -198,8 +203,8 @@ public class Loggly {
 
         /**
          * Set the interval between Loggly log uploads. Note that small intervals
-         * drains the battery if you log many messages. If not specified this 
-         * defaults to 500. Also see {@link #uploadIntervalSecs(int seconds)}, 
+         * drains the battery if you log many messages. If not specified this
+         * defaults to 500. Also see {@link #uploadIntervalSecs(int seconds)},
          * when either condition is fulfilled the logs will be uploaded.
          * @param count Number of logs
          */
@@ -211,7 +216,7 @@ public class Loggly {
         /**
          * Set the time before the background log processing stops if no messages have
          * been logged. This processing is automatically resumed when a new message is logged.
-         * This defaults to 1200 seconds (20min) if not specified. 
+         * This defaults to 1200 seconds (20min) if not specified.
          * @param seconds Time in seconds
          * @return
          */
@@ -219,7 +224,7 @@ public class Loggly {
             this.idleSecs = seconds;
             return this;
         }
-        
+
         /**
          * Set whether four default key-value pairs should be appended to each logged message:
          * <ul>
@@ -234,7 +239,7 @@ public class Loggly {
             this.appendDefaultInfo = append;
             return this;
         }
-        
+
         /**
          * Append a key-value pair to each logged message. Chain multiple appendStickyInfo
          * to append multiple key-value pairs.
@@ -245,11 +250,11 @@ public class Loggly {
             this.stickyInfo.put(key, value);
             return this;
         }
-        
+
         /**
          * Configure the buffer size for log messages that are not yet uploaded.
-         * The oldest messages will be dropped if more info is logged than what 
-         * fits in the buffer. 
+         * The oldest messages will be dropped if more info is logged than what
+         * fits in the buffer.
          * @param size Max size in bytes
          * @return
          */
@@ -257,43 +262,43 @@ public class Loggly {
             this.maxSizeOnDisk = size;
             return this;
         }
-        
+
         /**
          * Create the {@link Loggly} instance.
          */
         public Loggly init() {
             if(logglyTag == null)
                 logglyTag = context.getPackageName();
-            
-            if(logglyUrl == null) 
+
+            if(logglyUrl == null)
                 logglyUrl = LOGGLY_DEFAULT_URL;
-            
+
             if(uploadIntervalSecs < UPLOAD_INTERVAL_SECS_MIN)
                 uploadIntervalSecs = UPLOAD_INTERVAL_SECS_MIN;
-            
+
             if(uploadIntervalLogCount < UPLOAD_INTERVAL_LOG_COUNT_MIN)
                 uploadIntervalLogCount = UPLOAD_INTERVAL_LOG_COUNT_MIN;
 
             if(idleSecs < IDLE_SECS_MIN)
                 idleSecs = IDLE_SECS_MIN;
-            
+
             if(maxSizeOnDisk < MAX_SIZE_ON_DISK_MIN)
                 maxSizeOnDisk = MAX_SIZE_ON_DISK_MIN;
 
             if (mInstance == null) {
                 synchronized (Loggly.class) {
                     if (mInstance == null) {
-                        mInstance = new Loggly(context, token, logglyTag, logglyUrl, 
-                                uploadIntervalSecs, uploadIntervalLogCount, idleSecs, 
+                        mInstance = new Loggly(context, token, logglyTag, logglyUrl,
+                                uploadIntervalSecs, uploadIntervalLogCount, idleSecs,
                                 appendDefaultInfo, stickyInfo, maxSizeOnDisk);
                     }
                 }
             }
-                        
+
             return mInstance;
         }
     }
-    
+
     /**
      * Creates a {@link Builder} instance.
      * @param context Context
@@ -308,14 +313,14 @@ public class Loggly {
                 }
             }
         }
-        
-        return mBuilder; 
+
+        return mBuilder;
     }
-    
-    private Loggly(Context context, String token, String logglyTag, String logglyUrl, 
-            int uploadIntervalSecs, int uploadIntervalLogCount, int idleSecs, 
-            boolean appendDefaultInfo, HashMap<String, String> stickyInfo, int maxSizeOnDisk) {
-        
+
+    private Loggly(Context context, String token, String logglyTag, String logglyUrl,
+                   int uploadIntervalSecs, int uploadIntervalLogCount, int idleSecs,
+                   boolean appendDefaultInfo, HashMap<String, String> stickyInfo, int maxSizeOnDisk) {
+
         mContext = context;
         mToken = token;
         mLogglyTag = logglyTag;
@@ -325,35 +330,50 @@ public class Loggly {
         mAppendDefaultInfo = appendDefaultInfo;
         mStickyInfo = stickyInfo;
         mMaxSizeOnDisk = maxSizeOnDisk;
-                
+
         mRecentLogFile = recentLogFile();
         mDateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US);
-        
+
         PackageManager manager = context.getPackageManager();
         try {
             PackageInfo info = manager.getPackageInfo(context.getPackageName(), 0);
             mAppVersionName = info.versionName;
             mAppVersionCode = info.versionCode;
         } catch (NameNotFoundException e) {}
-        
-        RestAdapter restAdapter = new RestAdapter.Builder()
-        .setEndpoint(logglyUrl)
-        .build();
-        mBulkLogService = restAdapter.create(IBulkLog.class);
-        
+
+        OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .addInterceptor(new Interceptor() {
+                    @Override
+                    public Response intercept(Chain chain) throws IOException {
+                        Request.Builder ongoing = chain.request().newBuilder();
+                        ongoing.addHeader("Accept", "application/json");
+                        return chain.proceed(ongoing.build());
+                    }
+                });
+
+
+        OkHttpClient client = builder.build();
+        Retrofit retrofit = new Retrofit.Builder()
+                .baseUrl(logglyUrl)
+                .addConverterFactory(GsonConverterFactory.create())
+                .client(client)
+                .build();
+
+        mBulkLogService = retrofit.create(IBulkLog.class);
+
         start();
-    }    
+    }
 
     private static synchronized void start() {
         if(mThread != null && mThread.isAlive())
             return;
-        
+
         mThread = new Thread(new Runnable() {
             @Override
             public void run() {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
                 mThread.setName(THREAD_NAME);
-                
+
                 List<JSONObject> logBatch = new ArrayList<JSONObject>();
                 while(true) {
                     try {
@@ -365,23 +385,23 @@ public class Loggly {
                         }
 
                         long now = SystemClock.elapsedRealtime() / 1000;
-                        
+
                         if(!logBatch.isEmpty()) {
                             mLastLog = now;
                             mLogCounter += logBatch.size();
                             logToFile(logBatch);
                             logBatch.clear();
                         }
-                        
-                        if((now - mLastUpload) >= mUploadIntervalSecs 
+
+                        if((now - mLastUpload) >= mUploadIntervalSecs
                                 || mLogCounter >= mUploadIntervalLogCount) {
                             postLogs();
                         }
-                        
+
                         if(((now - mLastLog) >= mIdleSecs) && mIdleSecs > 0 && mLastLog > 0) {
                             mThread.interrupt();
                         }
-                        
+
                     } catch (InterruptedException e) {
                         mLogQueue.drainTo(logBatch);
                         logToFile(logBatch);
@@ -391,14 +411,14 @@ public class Loggly {
                 }
             }
         });
-         
+
         mThread.start();
     }
-        
+
     private static void log(JSONObject jsonObject) {
         if(!mThread.isAlive())
             start();
-        
+
         mLogQueue.offer(jsonObject);
     }
 
@@ -411,7 +431,7 @@ public class Loggly {
             log(json);
         } catch (JSONException e) {}
     }
-    
+
     /**
      * Log a verbose message.
      * @param key Loggly json field
@@ -419,7 +439,7 @@ public class Loggly {
      */
     public static void v(String key, Object msg) {
         log(key, msg, "verbose", System.currentTimeMillis());
-    }        
+    }
 
     /**
      * Log a verbose message and an exception.
@@ -435,36 +455,36 @@ public class Loggly {
      * Log a debug message.
      * @param key Loggly json field
      * @param msg The log message, either a JSONObject, String, Boolean, Integer, Long or Double
-     */    
+     */
     public static void d(String key, Object msg) {
         log(key, msg, "debug", System.currentTimeMillis());
-    }        
+    }
 
     /**
      * Log a debug message and an exception.
      * @param key Loggly json field
      * @param msg The log message
      * @param tr The exception to log
-     */    
+     */
     public static void d(String key, String msg, Throwable tr) {
         d(key, msg + '\n' + Log.getStackTraceString(tr));
     }
-    
+
     /**
      * Log an info message.
      * @param key Loggly json field
      * @param msg The log message, either a JSONObject, String, Boolean, Integer, Long or Double
-     */    
+     */
     public static void i(String key, Object msg) {
         log(key, msg, "info", System.currentTimeMillis());
-    }        
-    
+    }
+
     /**
      * Log an info message and an exception.
      * @param key Loggly json field
      * @param msg The log message
      * @param tr The exception to log
-     */        
+     */
     public static void i(String key, String msg, Throwable tr) {
         i(key, msg + '\n' + Log.getStackTraceString(tr));
     }
@@ -473,26 +493,26 @@ public class Loggly {
      * Log a warning message.
      * @param key Loggly json field
      * @param msg The log message, either a JSONObject, String, Boolean, Integer, Long or Double
-     */        
+     */
     public static void w(String key, Object msg) {
         log(key, msg, "warning", System.currentTimeMillis());
-    }        
-    
+    }
+
     /**
      * Log a warning message and an exception.
      * @param key Loggly json field
      * @param msg The log message
      * @param tr The exception to log
-     */            
+     */
     public static void w(String key, String msg, Throwable tr) {
         w(key, msg + '\n' + Log.getStackTraceString(tr));
     }
-    
+
     /**
      * Log an error message.
      * @param key Loggly json field
      * @param msg The log message, either a JSONObject, String, Boolean, Integer, Long or Double
-     */        
+     */
     public static void e(String key, Object msg) {
         log(key, msg, "error", System.currentTimeMillis());
     }
@@ -502,18 +522,18 @@ public class Loggly {
      * @param key Loggly json field
      * @param msg The log message
      * @param tr The exception to log
-     */            
+     */
     public static void e(String key, String msg, Throwable tr) {
         e(key, msg + '\n' + Log.getStackTraceString(tr));
     }
-    
+
     /**
      * Force an upload of all log messages that have not yet been uploaded.
      * This will block the current thread, don't call from the UI thread.
      * <p>
      * Note that all log messages will be uploaded every time a new Loggly
-     * instance is created, so this is just to provide a point of 
-     * synchronization if necessary. 
+     * instance is created, so this is just to provide a point of
+     * synchronization if necessary.
      */
     public static synchronized void forceUpload() {
         mThread.interrupt();
@@ -521,11 +541,11 @@ public class Loggly {
             mThread.join();
         } catch (InterruptedException e) {}
     }
-    
+
     /**
      * Set or reset a key-value pair that is appended to each Loggly json log message.
      * @param key The Loggly json field
-     * @param msg The message 
+     * @param msg The message
      */
     public static void setStickyInfo(String key, String msg) {
         JSONObject json = new JSONObject();
@@ -536,7 +556,7 @@ public class Loggly {
             log(json);
         } catch (JSONException e) {}
     }
-    
+
     private static File recentLogFile() {
         File dir = mContext.getDir(LOG_FOLDER, Context.MODE_PRIVATE);
         File[] files = dir.listFiles();
@@ -548,12 +568,12 @@ public class Loggly {
         for (int i = 1; i < files.length; i++) {
             if (file.lastModified() < files[i].lastModified()) {
                 file = files[i];
-            }            
+            }
         }
         return file;
 
     }
-    
+
     private static File oldestLogFile() {
         File dir = mContext.getDir(LOG_FOLDER, Context.MODE_PRIVATE);
         File[] files = dir.listFiles();
@@ -565,23 +585,23 @@ public class Loggly {
         for (int i = 1; i < files.length; i++) {
             if (file.lastModified() > files[i].lastModified()) {
                 file = files[i];
-            }            
+            }
         }
         return file;
     }
-    
+
     private static File createLogFile() {
         File dir = mContext.getDir(LOG_FOLDER, Context.MODE_PRIVATE);
         File logFile = new File(dir, Long.toString(System.currentTimeMillis()));
         return logFile;
     }
-    
+
     private static void logToFile(List<JSONObject> msgBatch) {
         if(msgBatch.isEmpty())
             return;
-        
+
         try {
-            
+
             // Size of logs on disk
             File dir = mContext.getDir(LOG_FOLDER, Context.MODE_PRIVATE);
             long totalSize = 0;
@@ -595,27 +615,27 @@ public class Loggly {
                 int numFiles = logFiles.length;
                 if(numFiles <= 1)
                     return;
-                
+
                 oldestLogFile().delete();
             }
-            
+
             // Create a new log file if necessary
             if(mRecentLogFile == null || mRecentLogFile.length() > LOGGLY_MAX_POST_SIZE)
                 mRecentLogFile = createLogFile();
-            
-            PrintStream ps = new PrintStream(new FileOutputStream(mRecentLogFile, true));            
+
+            PrintStream ps = new PrintStream(new FileOutputStream(mRecentLogFile, true));
             for(JSONObject msg : msgBatch) {
                 try {
                     if(msg.has(UPDATE_STICKY_INFO_MSG)) {
                         mStickyInfo.put(msg.getString("key"), msg.getString("msg"));
                         continue;
                     }
-                    
+
                     // Reformat timestamp to ISO-8601 as expected by Loggly
                     long timestamp = msg.getLong("timestamp");
                     msg.remove("timestamp");
                     msg.put("timestamp", mDateFormat.format(timestamp));
-                    
+
                     // Append default info
                     if(mAppendDefaultInfo) {
                         msg.put("appversionname", mAppVersionName);
@@ -623,7 +643,7 @@ public class Loggly {
                         msg.put("devicemodel", android.os.Build.MODEL);
                         msg.put("androidversioncode", Integer.toString(android.os.Build.VERSION.SDK_INT));
                     }
-                    
+
                     // Append sticky info
                     if(!mStickyInfo.isEmpty()) {
                         for(String key : mStickyInfo.keySet())
@@ -631,20 +651,19 @@ public class Loggly {
                     }
 
                 } catch (JSONException e) {}
-                
+
                 ps.println(msg.toString().replace("\n", "\\n"));
             }
-            
+
             ps.close();
         } catch (FileNotFoundException e) {}
     }
-    
+
     private interface IBulkLog {
-        @Headers("content-type:application/json")
         @POST("/bulk/{token}/tag/{tag}")
-        Response log(@Path("token") String token, @Path("tag") String logtag, @Body TypedInput body);
+        Call<LogglyResponse> log(@Path("token") String token, @Path("tag") String logtag, @Body RequestBody body);
     }
-    
+
     private static void postLogs() {
         mLastUpload = SystemClock.elapsedRealtime() / 1000;
         mLogCounter = 0;
@@ -652,9 +671,9 @@ public class Loggly {
         File dir = mContext.getDir(LOG_FOLDER, Context.MODE_PRIVATE);
         for (File logFile : dir.listFiles()) {
             StringBuilder builder = new StringBuilder();
-            
+
             try {
-                // Read log files and build body of newline-separated json log entries                
+                // Read log files and build body of newline-separated json log entries
                 FileInputStream fis = new FileInputStream(logFile);
                 BufferedReader reader = new BufferedReader(new InputStreamReader(fis));
                 String line;
@@ -672,21 +691,44 @@ public class Loggly {
             String json = builder.toString();
             if (json.isEmpty())
                 return;
-            
             try {
-                // Blocking POST
-                TypedInput body = new TypedByteArray("application/json", json.getBytes());
-                Response answer = mBulkLogService.log(mToken, mLogglyTag, body);
+                MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+                RequestBody body = RequestBody.create(JSON, json.getBytes());
+
+                Call<LogglyResponse> call = mBulkLogService.log(mToken, mLogglyTag, body);
+                retrofit2.Response<LogglyResponse> response = call.execute();
+
+                if (!response.isSuccessful()) throw new IOException("Unexpected code " + response);
 
                 // Successful post
-                if (answer.getStatus() == 200) {
+                if (response.code() == 200) {
                     logFile.delete();
                     mRecentLogFile = null;
+                } else {
+
                 }
-            } 
-            
+            }
+
             // Post failed for some reason, keep log files and retry later
-            catch (RetrofitError error) {}
+            catch (Exception error) {
+
+            }
+        }
+    }
+
+    public class LogglyResponse {
+        @SerializedName("response")
+        public String response;
+
+        public boolean isSuccess() {
+
+            try {
+                return response.toLowerCase().equals("ok");
+            } catch (Exception e) {
+                // All non-ok responses trigger false
+            }
+
+            return false;
         }
     }
 }
